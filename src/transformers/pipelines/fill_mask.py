@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, Optional, Union
+from multiprocessing import Pool
 
 import numpy as np
 
@@ -113,7 +114,7 @@ class FillMaskPipeline(Pipeline):
             - **token** (:obj:`str`) -- The predicted token (to replace the masked one).
         """
         inputs = self._parse_and_tokenize(*args, **kwargs)
-        outputs = self._forward(inputs, return_tensors=True)
+        outputs = self._forward(inputs, return_tensors=True, move_to_cpu=False)
 
         results = []
         batch_size = outputs.shape[0] if self.framework == "tf" else outputs.size(0)
@@ -136,11 +137,53 @@ class FillMaskPipeline(Pipeline):
                 targets_proc.append(target_enc[0])
             target_inds = np.array(self.tokenizer.convert_tokens_to_ids(targets_proc))
 
-        for i in range(batch_size):
-            input_ids = inputs["input_ids"][i]
-            result = []
+        # much better
+        if self.framework == 'pt':
+            logits = torch.empty((batch_size, outputs.shape[2]), dtype=outputs.dtype, device=torch.device('cuda'))
+            input_ids = inputs["input_ids"]
+            masked_index = torch.nonzero(input_ids.eq(self.tokenizer.mask_token_id))[..., 1].tolist()
+            # the best to remove loops altogether, maybe requies a custom op
+            for i in range(batch_size):
+                logits[i, :] = outputs[i, masked_index[i], :]
+            probs = logits.softmax(dim=1)
+            if targets is None:
+                values, predictions = probs.topk(top_k if top_k is not None else self.top_k, dim=1)
+                values = values.cpu()
+                predictions = predictions.cpu()
+            else:
+                values = probs[..., target_inds].cpu()
+                sort_inds = list(reversed(values.argsort(dim=-1)))
+                values = values[..., sort_inds]
+                predictions = target_inds[sort_inds]
 
-            if self.framework == "tf":
+            # pad_token_id = self.tokenizer.pad_token_id
+
+            # def fill_back(values_predictions):
+            #     result = []
+            #     print(values_predictions)
+            #     for v, p in values_predictions:
+            #         tokens = input_ids.numpy()
+            #         tokens[masked_index] = p
+            #         # Filter padding out:
+            #         tokens = tokens[np.where(tokens != pad_token_id)]
+            #         result.append(
+            #             {
+            #                 "sequence": self.tokenizer.decode(tokens, skip_special_tokens=True),
+            #                 "score": v,
+            #                 "token": p,
+            #                 "token_str": self.tokenizer.decode(p),
+            #             }
+            #         )
+            #     return result
+
+            # # workers = Pool()
+            # results = list(map(fill_back, zip(values, predictions)))
+
+        # tensorflow legacy
+        if self.framework == "tf":
+            for i in range(batch_size):
+                input_ids = inputs["input_ids"][i]
+                result = []
                 masked_index = tf.where(input_ids == self.tokenizer.mask_token_id).numpy()
 
                 # Fill mask pipeline supports only one ${mask_token} per sample
@@ -156,23 +199,11 @@ class FillMaskPipeline(Pipeline):
                     sort_inds = tf.reverse(tf.argsort(values), [0])
                     values = tf.gather_nd(values, tf.reshape(sort_inds, (-1, 1))).numpy()
                     predictions = target_inds[sort_inds.numpy()]
-            else:
-                masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False)
 
-                # Fill mask pipeline supports only one ${mask_token} per sample
-                self.ensure_exactly_one_mask_token(masked_index.numpy())
-
-                logits = outputs[i, masked_index.item(), :]
-                probs = logits.softmax(dim=0)
-                if targets is None:
-                    values, predictions = probs.topk(top_k if top_k is not None else self.top_k)
-                else:
-                    values = probs[..., target_inds]
-                    sort_inds = list(reversed(values.argsort(dim=-1)))
-                    values = values[..., sort_inds]
-                    predictions = target_inds[sort_inds]
-
-            for v, p in zip(values.tolist(), predictions.tolist()):
+        for i in range(batch_size):
+            input_ids = inputs["input_ids"][i]
+            result = []
+            for v, p in zip(values[i].tolist(), predictions[i].tolist()):
                 tokens = input_ids.numpy()
                 tokens[masked_index] = p
                 # Filter padding out:
@@ -188,6 +219,8 @@ class FillMaskPipeline(Pipeline):
 
             # Append
             results += [result]
+
+        torch.cuda.synchronize()
 
         if len(results) == 1:
             return results[0]

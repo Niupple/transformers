@@ -598,7 +598,7 @@ class Pipeline(_ScikitCompat):
         inputs = self._parse_and_tokenize(*args, **kwargs)
         return self._forward(inputs)
 
-    def _forward(self, inputs, return_tensors=False):
+    def _forward(self, inputs, return_tensors=False, move_to_cpu=True):
         """
         Internal framework specific forward dispatching
 
@@ -617,7 +617,14 @@ class Pipeline(_ScikitCompat):
             else:
                 with torch.no_grad():
                     inputs = self.ensure_tensor_on_device(**inputs)
-                    predictions = self.model(**inputs)[0].cpu()
+                    predictions = self.model(**inputs)[0]
+                    if move_to_cpu:
+                        predictions = predictions.cpu()
+                        print(predictions.shape)
+                        print(predictions)
+                    else:
+                        torch.cuda.synchronize()
+
 
         if return_tensors:
             return predictions
