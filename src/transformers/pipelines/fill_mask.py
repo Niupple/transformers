@@ -1,5 +1,4 @@
 from typing import TYPE_CHECKING, Optional, Union
-from multiprocessing import Pool
 
 import numpy as np
 
@@ -21,12 +20,12 @@ if is_tf_available():
 
 if is_torch_available():
     import torch
-
+    import torch.multiprocessing as mp
     from ..models.auto.modeling_auto import MODEL_FOR_MASKED_LM_MAPPING
 
 
 logger = logging.get_logger(__name__)
-
+sentinal = None
 
 @add_end_docstrings(
     PIPELINE_INIT_ARGS,
@@ -91,31 +90,13 @@ class FillMaskPipeline(Pipeline):
                 f"No mask_token ({self.tokenizer.mask_token}) found on the input",
             )
 
-    def __call__(self, *args, targets=None, top_k: Optional[int] = None, **kwargs):
-        """
-        Fill the masked token in the text(s) given as inputs.
+    def _stage_1(self, *args, **kwargs):
+        return self._parse_and_tokenize(*args, **kwargs)
 
-        Args:
-            args (:obj:`str` or :obj:`List[str]`):
-                One or several texts (or one list of prompts) with masked tokens.
-            targets (:obj:`str` or :obj:`List[str]`, `optional`):
-                When passed, the model will return the scores for the passed token or tokens rather than the top k
-                predictions in the entire vocabulary. If the provided targets are not in the model vocab, they will be
-                tokenized and the first resulting token will be used (with a warning).
-            top_k (:obj:`int`, `optional`):
-                When passed, overrides the number of predictions to return.
+    def _stage_2(self, inputs, *args, **kwargs):
+        return self._forward(inputs, return_tensors=True, move_to_cpu=False)
 
-        Return:
-            A list or a list of list of :obj:`dict`: Each result comes as list of dictionaries with the following keys:
-
-            - **sequence** (:obj:`str`) -- The corresponding input with the mask token prediction.
-            - **score** (:obj:`float`) -- The corresponding probability.
-            - **token** (:obj:`int`) -- The predicted token id (to replace the masked one).
-            - **token** (:obj:`str`) -- The predicted token (to replace the masked one).
-        """
-        inputs = self._parse_and_tokenize(*args, **kwargs)
-        outputs = self._forward(inputs, return_tensors=True, move_to_cpu=False)
-
+    def _stage_3(self, inputs, outputs, *args, targets=None, top_k: Optional[int] = None, **kwargs):
         results = []
         batch_size = outputs.shape[0] if self.framework == "tf" else outputs.size(0)
 
@@ -155,29 +136,6 @@ class FillMaskPipeline(Pipeline):
                 sort_inds = list(reversed(values.argsort(dim=-1)))
                 values = values[..., sort_inds]
                 predictions = target_inds[sort_inds]
-
-            # pad_token_id = self.tokenizer.pad_token_id
-
-            # def fill_back(values_predictions):
-            #     result = []
-            #     print(values_predictions)
-            #     for v, p in values_predictions:
-            #         tokens = input_ids.numpy()
-            #         tokens[masked_index] = p
-            #         # Filter padding out:
-            #         tokens = tokens[np.where(tokens != pad_token_id)]
-            #         result.append(
-            #             {
-            #                 "sequence": self.tokenizer.decode(tokens, skip_special_tokens=True),
-            #                 "score": v,
-            #                 "token": p,
-            #                 "token_str": self.tokenizer.decode(p),
-            #             }
-            #         )
-            #     return result
-
-            # # workers = Pool()
-            # results = list(map(fill_back, zip(values, predictions)))
 
         # tensorflow legacy
         if self.framework == "tf":
@@ -224,4 +182,150 @@ class FillMaskPipeline(Pipeline):
 
         if len(results) == 1:
             return results[0]
+        return results
+
+    def __call__(self, *args, targets=None, top_k: Optional[int] = None, **kwargs):
+        """
+        Fill the masked token in the text(s) given as inputs.
+
+        Args:
+            args (:obj:`str` or :obj:`List[str]`):
+                One or several texts (or one list of prompts) with masked tokens.
+            targets (:obj:`str` or :obj:`List[str]`, `optional`):
+                When passed, the model will return the scores for the passed token or tokens rather than the top k
+                predictions in the entire vocabulary. If the provided targets are not in the model vocab, they will be
+                tokenized and the first resulting token will be used (with a warning).
+            top_k (:obj:`int`, `optional`):
+                When passed, overrides the number of predictions to return.
+
+        Return:
+            A list or a list of list of :obj:`dict`: Each result comes as list of dictionaries with the following keys:
+
+            - **sequence** (:obj:`str`) -- The corresponding input with the mask token prediction.
+            - **score** (:obj:`float`) -- The corresponding probability.
+            - **token** (:obj:`int`) -- The predicted token id (to replace the masked one).
+            - **token** (:obj:`str`) -- The predicted token (to replace the masked one).
+        """
+        
+        inputs = self._stage_1(*args, **kwargs)
+        outputs = self._stage_2(inputs)
+        results = self._stage_3(inputs, outputs, targets, top_k)
+
+        return results
+
+    def w_stage_1(self, qin, qout):
+        while True:
+            x = qin.get()
+            if x is sentinal:
+                # print("s1 met sentinal, waiting")
+                qout.put(sentinal)
+                self.p2_exited.wait()
+                break
+            args, kwargs = x
+            # print("s1 got a task.")
+            y = self._stage_1(*args, **kwargs)
+            # print("s1 put y")
+            qout.put(y)
+        # print("s1 exiting")
+
+    def w_stage_2(self, qin, qout):
+        while True:
+            inputs = qin.get()
+            if inputs is sentinal:
+                # print("s2 met sentinal, waiting")
+                qout.put(sentinal)
+                self.p3_exited.wait()
+                break
+            # print("s2 got a task")
+            outputs = self._stage_2(inputs)
+            inputs_clone = inputs
+            # print("s2 put")
+            qout.put((inputs_clone, outputs))
+        self.p2_exited.set()
+        # print("s2 exiting")
+
+    def w_stage_3(self, qin, qout):
+        while True:
+            x = qin.get()
+            if x is sentinal:
+                # print("s3 met sentinal, exiting")
+                break
+            inputs, outputs = x
+            # print("s3 got a job")
+            result = self._stage_3(inputs, outputs) # parameters like targets and topk cannot be customized
+            del inputs, outputs
+            # print("s3 put")
+            qout.put(result)
+        self.p3_exited.set()
+        qout.put(sentinal)
+
+    def infer_offline(self, works: list, *args, max_in_queue=5, **kwargs):
+        mp.set_start_method('forkserver')
+        qin = mp.Queue()
+        q1 = mp.Queue()
+        q2 = mp.Queue()
+        qout = mp.Queue()
+
+        self.p3_exited = mp.Event()
+        self.p2_exited = mp.Event()
+
+        p1 = mp.Process(target=self.w_stage_1, args=(qin, q1))
+        p2 = mp.Process(target=self.w_stage_2, args=(q1, q2))
+        p3 = mp.Process(target=self.w_stage_3, args=(q2, qout))
+        
+        p1.start()
+        p2.start()
+        p3.start()
+
+        for work in works:
+            qin.put(([work], dict()))
+        qin.put(sentinal)
+        results = []
+        while True:
+            x = qout.get()
+            if x is sentinal:
+                break
+            else:
+                results.append(x)
+        p1.join()
+        p2.join()
+        p3.join()
+
+        return results
+
+    # not great at all
+    def infer_offline_thread(self, works):
+        import threading as mt
+        from queue import Queue
+
+        qin = Queue()
+        q1 = Queue()
+        q2 = Queue()
+        qout = Queue()
+
+        self.p3_exited = mt.Event()
+        self.p2_exited = mt.Event()
+
+        p1 = mt.Thread(target=self.w_stage_1, args=(qin, q1))
+        p2 = mt.Thread(target=self.w_stage_2, args=(q1, q2))
+        p3 = mt.Thread(target=self.w_stage_3, args=(q2, qout))
+        
+        p1.start()
+        p2.start()
+        p3.start()
+
+        for work in works:
+            qin.put(([work], dict()))
+        qin.put(sentinal)
+        results = []
+        while True:
+            x = qout.get()
+            if x is sentinal:
+                break
+            else:
+                results.append(x)
+        p1.join()
+        p2.join()
+        p3.join()
+
         return results
