@@ -17,7 +17,7 @@
  tokenization_utils_fast.py
 """
 import itertools
-import re
+import regex as re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple, Union, overload
 
@@ -256,8 +256,12 @@ class PreTrainedTokenizer(PreTrainedTokenizerBase):
         if hasattr(self, "do_lower_case") and self.do_lower_case:
             # convert non-special tokens to lowercase
             escaped_special_toks = [re.escape(s_tok) for s_tok in self.all_special_tokens]
-            pattern = r"(" + r"|".join(escaped_special_toks) + r")|" + r"(.+?)"
-            text = re.sub(pattern, lambda m: m.groups()[0] or m.groups()[1].lower(), text)
+            # pattern = r"(" + r"|".join(escaped_special_toks) + r")|" + r"(.+?)"
+            # text = re.sub(pattern, lambda m: m.groups()[0] or m.groups()[1].lower(), text)
+            pattern = r"(" + r"|".join(escaped_special_toks) + r")"
+            pat = re.compile(pattern)
+            split_text = pat.split(text)
+            text = "".join(map(lambda x: x if pat.match(x) else x.lower(), split_text))
 
         def split_on_token(tok, text):
             result = []

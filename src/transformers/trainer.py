@@ -431,7 +431,7 @@ class Trainer:
         logger.info(
             f"The following columns {dset_description}don't have a corresponding argument in `{self.model.__class__.__name__}.forward` and have been ignored: {', '.join(ignored_columns)}."
         )
-        dataset.set_format(type=dataset.format["type"], columns=columns)
+        dataset.set_format(type=dataset.format["type"], columns=columns, format_kwargs=dataset.format["format_kwargs"])
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.sampler.Sampler]:
         if isinstance(self.train_dataset, torch.utils.data.IterableDataset) or not isinstance(
@@ -921,6 +921,12 @@ class Trainer:
                 else self.args.max_steps * self.args.gradient_accumulation_steps
             )
             self.control = self.callback_handler.on_epoch_begin(self.args, self.state, self.control)
+
+            print(epoch_iterator)
+
+            for i, inputs in enumerate(epoch_iterator):
+                print(i, inputs)
+                break
 
             for step, inputs in enumerate(epoch_iterator):
 

@@ -246,6 +246,7 @@ def pipeline(
     framework: Optional[str] = None,
     revision: Optional[str] = None,
     use_fast: bool = True,
+    data_parallel: bool = False,
     **kwargs
 ) -> Pipeline:
     """
@@ -415,4 +416,4 @@ def pipeline(
                     )
                     break
 
-    return task_class(model=model, tokenizer=tokenizer, modelcard=modelcard, framework=framework, task=task, **kwargs)
+    return task_class(model=model, tokenizer=tokenizer, modelcard=modelcard, framework=framework, task=task, data_parallel=data_parallel, **kwargs)

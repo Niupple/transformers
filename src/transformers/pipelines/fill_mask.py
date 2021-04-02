@@ -60,6 +60,7 @@ class FillMaskPipeline(Pipeline):
         device: int = -1,
         top_k=5,
         task: str = "",
+        data_parallel: bool = False
     ):
         super().__init__(
             model=model,
@@ -70,10 +71,12 @@ class FillMaskPipeline(Pipeline):
             device=device,
             binary_output=True,
             task=task,
+            data_parallel=data_parallel
         )
 
         self.check_model_type(TF_MODEL_WITH_LM_HEAD_MAPPING if self.framework == "tf" else MODEL_FOR_MASKED_LM_MAPPING)
         self.top_k = top_k
+        self.scripted = False
 
     def ensure_exactly_one_mask_token(self, masked_index: np.ndarray):
         numel = np.prod(masked_index.shape)
@@ -123,8 +126,10 @@ class FillMaskPipeline(Pipeline):
             logits = torch.empty((batch_size, outputs.shape[2]), dtype=outputs.dtype, device=torch.device('cuda'))
             input_ids = inputs["input_ids"]
             masked_index = torch.nonzero(input_ids.eq(self.tokenizer.mask_token_id))[..., 1].tolist()
+            # print(masked_index)
             # the best to remove loops altogether, maybe requies a custom op
             for i in range(batch_size):
+                # print(logits.shape, masked_index[i])
                 logits[i, :] = outputs[i, masked_index[i], :]
             probs = logits.softmax(dim=1)
             if targets is None:
@@ -206,8 +211,9 @@ class FillMaskPipeline(Pipeline):
             - **token** (:obj:`int`) -- The predicted token id (to replace the masked one).
             - **token** (:obj:`str`) -- The predicted token (to replace the masked one).
         """
-        
+        import time
         inputs = self._stage_1(*args, **kwargs)
+        # print("inputs = ", inputs)
         outputs = self._stage_2(inputs)
         results = self._stage_3(inputs, outputs, targets, top_k)
 

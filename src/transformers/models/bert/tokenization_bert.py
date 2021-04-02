@@ -18,6 +18,7 @@
 import collections
 import os
 import unicodedata
+import regex as re
 from typing import List, Optional, Tuple
 
 from ...tokenization_utils import PreTrainedTokenizer, _is_control, _is_punctuation, _is_whitespace
@@ -379,6 +380,11 @@ class BasicTokenizer(object):
         self.never_split = set(never_split)
         self.tokenize_chinese_chars = tokenize_chinese_chars
         self.strip_accents = strip_accents
+        self.space_re = re.compile(r'\s+')
+        self.mn_re = re.compile(r"[\p{Mn}]+")
+        self.clean_re = re.compile(r'[\x00\uFFFD\p{C}]+')
+        self.pun_re = re.compile(r"([\p{P}\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E])")
+        self.chinese_re = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\U00020000-\U0002A6DF\U0002A700-\U0002B73F\U0002B740-\U0002B81F\U0002B820-\U0002CEAF\uF900-\uFAFF\U0002F800-\U0002FA1F]")
 
     def tokenize(self, text, never_split=None):
         """
@@ -420,48 +426,53 @@ class BasicTokenizer(object):
     def _run_strip_accents(self, text):
         """Strips accents from a piece of text."""
         text = unicodedata.normalize("NFD", text)
-        output = []
-        for char in text:
-            cat = unicodedata.category(char)
-            if cat == "Mn":
-                continue
-            output.append(char)
-        return "".join(output)
+        # output = []
+        # for char in text:
+        #     cat = unicodedata.category(char)
+        #     if cat == "Mn":
+        #         continue
+        #     output.append(char)
+        # return "".join(output)
+        output = self.mn_re.sub('', text)
+        return output
 
     def _run_split_on_punc(self, text, never_split=None):
         """Splits punctuation on a piece of text."""
         if never_split is not None and text in never_split:
             return [text]
-        chars = list(text)
-        i = 0
-        start_new_word = True
-        output = []
-        while i < len(chars):
-            char = chars[i]
-            if _is_punctuation(char):
-                output.append([char])
-                start_new_word = True
-            else:
-                if start_new_word:
-                    output.append([])
-                start_new_word = False
-                output[-1].append(char)
-            i += 1
+        # chars = list(text)
+        # i = 0
+        # start_new_word = True
+        # output = []
+        # while i < len(chars):
+        #     char = chars[i]
+        #     if _is_punctuation(char):
+        #         output.append([char])
+        #         start_new_word = True
+        #     else:
+        #         if start_new_word:
+        #             output.append([])
+        #         start_new_word = False
+        #         output[-1].append(char)
+        #     i += 1
 
-        return ["".join(x) for x in output]
+        # return ["".join(x) for x in output]
+        # text = re.sub(r"[\p{P}]+", '.', text)
+        return self.pun_re.split(text)
 
     def _tokenize_chinese_chars(self, text):
         """Adds whitespace around any CJK character."""
-        output = []
-        for char in text:
-            cp = ord(char)
-            if self._is_chinese_char(cp):
-                output.append(" ")
-                output.append(char)
-                output.append(" ")
-            else:
-                output.append(char)
-        return "".join(output)
+        # output = []
+        # for char in text:
+        #     cp = ord(char)
+        #     if self._is_chinese_char(cp):
+        #         output.append(" ")
+        #         output.append(char)
+        #         output.append(" ")
+        #     else:
+        #         output.append(char)
+        # return "".join(output)
+        return self.chinese_re.sub(lambda x: " " + x.group(0) + " ", text)
 
     def _is_chinese_char(self, cp):
         """Checks whether CP is the codepoint of a CJK character."""
@@ -489,16 +500,20 @@ class BasicTokenizer(object):
 
     def _clean_text(self, text):
         """Performs invalid character removal and whitespace cleanup on text."""
-        output = []
-        for char in text:
-            cp = ord(char)
-            if cp == 0 or cp == 0xFFFD or _is_control(char):
-                continue
-            if _is_whitespace(char):
-                output.append(" ")
-            else:
-                output.append(char)
-        return "".join(output)
+        output = self.clean_re.sub('', text)
+        output = self.space_re.sub(' ', output)
+
+        return output
+        # output = []
+        # for char in text:
+        #     cp = ord(char)
+        #     if cp == 0 or cp == 0xFFFD or _is_control(char):
+        #         continue
+        #     if _is_whitespace(char):
+        #         output.append(" ")
+        #     else:
+        #         output.append(char)
+        # return "".join(output)
 
 
 class WordpieceTokenizer(object):

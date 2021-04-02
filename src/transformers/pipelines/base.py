@@ -471,6 +471,7 @@ class Pipeline(_ScikitCompat):
         args_parser: ArgumentHandler = None,
         device: int = -1,
         binary_output: bool = False,
+        data_parallel: bool = False,
     ):
 
         if framework is None:
@@ -483,15 +484,20 @@ class Pipeline(_ScikitCompat):
         self.framework = framework
         self.device = device if framework == "tf" else torch.device("cpu" if device < 0 else "cuda:{}".format(device))
         self.binary_output = binary_output
-
-        # Special handling
-        if self.framework == "pt" and self.device.type == "cuda":
-            self.model = self.model.to(self.device)
+        self.scripted = False
+        self.data_parallel = data_parallel
 
         # Update config with task specific parameters
         task_specific_params = self.model.config.task_specific_params
         if task_specific_params is not None and task in task_specific_params:
             self.model.config.update(task_specific_params.get(task))
+
+        if framework == 'pt' and self.data_parallel:
+            self.model = torch.nn.DataParallel(self.model)
+
+        # Special handling
+        if self.framework == "pt" and self.device.type == "cuda":
+            self.model = self.model.to(self.device)
 
     def save_pretrained(self, save_directory: str):
         """
@@ -570,11 +576,13 @@ class Pipeline(_ScikitCompat):
         """
         if not isinstance(supported_models, list):  # Create from a model mapping
             supported_models = [item[1].__name__ for item in supported_models.items()]
-        if self.model.__class__.__name__ not in supported_models:
+
+        model = self.model.module if self.data_parallel else self.model
+        if model.__class__.__name__ not in supported_models:
             raise PipelineException(
                 self.task,
-                self.model.base_model_prefix,
-                f"The model '{self.model.__class__.__name__}' is not supported for {self.task}. Supported models are {supported_models}",
+                model.base_model_prefix,
+                f"The model '{model.__class__.__name__}' is not supported for {self.task}. Supported models are {supported_models}",
             )
 
     def _parse_and_tokenize(
@@ -614,14 +622,15 @@ class Pipeline(_ScikitCompat):
             if self.framework == "tf":
                 # TODO trace model
                 predictions = self.model(inputs.data, training=False)[0]
-            else:
+            else:   # then it is pt
                 with torch.no_grad():
                     inputs = self.ensure_tensor_on_device(**inputs)
+                    # if not self.scripted:
+                    #     self.scripted_model = torch.jit.trace(self.model, inputs)
+                    #     self.scripted = True
                     predictions = self.model(**inputs)[0]
                     if move_to_cpu:
                         predictions = predictions.cpu()
-                        print(predictions.shape)
-                        print(predictions)
                     else:
                         torch.cuda.synchronize()
 
