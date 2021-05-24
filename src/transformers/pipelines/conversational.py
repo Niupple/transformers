@@ -342,7 +342,7 @@ class ConversationalPipeline(Pipeline):
         batching process.
         """
         outputs = []
-        for sequence in generated_tensor:
+        for sequence in generated_tensor.detach().cpu():
             sequence_tokens = []
             is_previous_pad = False
             for token in sequence:
